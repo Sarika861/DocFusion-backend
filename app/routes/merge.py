@@ -1,94 +1,51 @@
-import os
-import tempfile
-from typing import Annotated
-
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
+from pypdf import PdfWriter  # Install using: pip install pypdf
+import io
 
-from app.services.pdf_merger import merge_pdfs
-
-
-router = APIRouter(
-    prefix="/api",
-    tags=["Document Merger"]
-)
-
-
-MAX_FILES = 10
-MAX_FILE_SIZE = 10 * 1024 * 1024
-
+router = APIRouter(prefix="/api", tags=["merge"])
 
 @router.post("/merge-pdfs")
-async def merge_pdf_files(
-    files: Annotated[list[UploadFile], File(...)]
-):
-
-    if len(files) < 2:
+async def merge_pdfs(files: list[UploadFile] = File(...)):
+    # 1. Validate file count
+    if not files or len(files) < 2:
         raise HTTPException(
-            status_code=400,
-            detail="Please upload at least 2 PDF files."
+            status_code=400, 
+            detail="At least 2 PDF files are required for merging."
         )
 
-    if len(files) > MAX_FILES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"You can upload maximum {MAX_FILES} files."
-        )
-
-    for file in files:
-
-        if file.content_type != "application/pdf":
-            raise HTTPException(
-                status_code=400,
-                detail=f"{file.filename} is not a PDF file."
-            )
-
-    temp_files = []
+    merger = PdfWriter()
 
     try:
-
         for file in files:
-
-            content = await file.read()
-
-            if len(content) > MAX_FILE_SIZE:
+            # Check for PDF extension or content type
+            if not file.filename.lower().endswith('.pdf'):
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"{file.filename} is larger than 10 MB."
+                    status_code=400, 
+                    detail=f"File {file.filename} is not a valid PDF."
                 )
 
-            temp_file = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=".pdf"
-            )
+            # 2. Read file contents into BytesIO stream
+            pdf_bytes = await file.read()
+            merger.append(io.BytesIO(pdf_bytes))
 
-            temp_file.write(content)
-            temp_file.close()
+        # 3. Write merged PDF into memory stream
+        output_stream = io.BytesIO()
+        merger.write(output_stream)
+        merger.close()
 
-            temp_files.append(temp_file.name)
-
-        output_file = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".pdf"
-        )
-
-        output_path = output_file.name
-        output_file.close()
-
-        merge_pdfs(
-            temp_files,
-            output_path
-        )
-
-        return FileResponse(
-            output_path,
+        # 4. Return raw PDF bytes with correct headers
+        return Response(
+            content=output_stream.getvalue(),
             media_type="application/pdf",
-            filename="merged_document.pdf"
+            headers={
+                "Content-Disposition": "attachment; filename=merged_document.pdf"
+            }
         )
 
-    finally:
-
-        for file_path in temp_files:
-
-            if os.path.exists(file_path):
-                os.remove(file_path)
+    except Exception as e:
+        print(f"Error during PDF merge: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to merge PDF files: {str(e)}"
+        )
